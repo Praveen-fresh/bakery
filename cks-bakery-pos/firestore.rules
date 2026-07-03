@@ -1,0 +1,61 @@
+rules_version = '2';
+
+// Franchise-safe access model:
+// - Any signed-in staff member can read menu/recipe data.
+// - Stock and orders are scoped per outlet; a staff member can only
+//   write to the outlet they are assigned to (outletId on their user doc).
+// - Only Cloud Functions (admin SDK, which bypasses rules) may write
+//   stock deductions and stock movement logs -- clients never write
+//   these directly, which is what keeps deductions atomic and honest.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function staffOutletId() {
+      return get(/databases/$(database)/documents/staff/$(request.auth.uid)).data.outletId;
+    }
+
+    // Recipes: readable by all staff, immutable once written.
+    // A "new version" is a new document in the versions subcollection,
+    // never an edit of an existing version.
+    match /recipes/{recipeId} {
+      allow read: if isSignedIn();
+      allow write: if false; // managed by admin tooling only
+
+      match /versions/{versionId} {
+        allow read: if isSignedIn();
+        allow create: if false; // set via admin tooling, not client writes
+        allow update, delete: if false; // versions are immutable
+      }
+    }
+
+    // Menu items: readable by all staff.
+    match /menuItems/{itemId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // Per-outlet ingredient stock. Reads scoped to your outlet.
+    // Writes only via Cloud Functions (admin SDK).
+    match /outlets/{outletId}/stock/{ingredientId} {
+      allow read: if isSignedIn() && staffOutletId() == outletId;
+      allow write: if false;
+    }
+
+    // Immutable stock movement log, one doc per deduction/restock event.
+    match /outlets/{outletId}/stockMovements/{movementId} {
+      allow read: if isSignedIn() && staffOutletId() == outletId;
+      allow write: if false;
+    }
+
+    // Orders/bills, scoped to the outlet that created them.
+    match /outlets/{outletId}/orders/{orderId} {
+      allow read: if isSignedIn() && staffOutletId() == outletId;
+      allow create: if false; // created by the processOrder Cloud Function
+      allow update, delete: if false;
+    }
+  }
+}
